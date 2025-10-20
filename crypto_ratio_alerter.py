@@ -1,50 +1,66 @@
 # -----------------------------------------------------------------------------
-# --- 1. CONFIGURATION: Fill in your details here ---
+# --- 1. IMPORTS AND CONFIGURATION ---
 # -----------------------------------------------------------------------------
 
-import ccxt
+import math
 import time
+import os
+import ccxt
 import requests
 import pandas as pd
 import ta
+from requests.exceptions import RequestException
 
-# -----------------------------------------------------------------------------
-# --- 1. CONFIGURATION: Fill in your details here ---
-# -----------------------------------------------------------------------------
+# Import configuration from config.py
+try:
+    import config
+except ImportError:
+    print("Error: config.py not found.")
+    print("Please create a config.py file with your settings.")
+    exit()
 
-# -- Exchange & Symbols --
-BASE_SYMBOL = 'OM'
-QUOTE_SYMBOL = 'PIXEL'
-# The format required by the ccxt library, e.g., 'DOGE/BTC' or 'ETH/USDT'
-TICKER_SYMBOL_1 = 'OM/USDT'
-TICKER_SYMBOL_2 = 'PIXEL/USDT'
+# --- Main Configuration ---
+BASE_SYMBOL = config.BASE_SYMBOL
+QUOTE_SYMBOL = config.QUOTE_SYMBOL
+TICKER_SYMBOL_1 = config.TICKER_SYMBOL_1
+TICKER_SYMBOL_2 = config.TICKER_SYMBOL_2
+TARGET_RATIO = config.TARGET_RATIO
+ALERT_CONDITION = config.ALERT_CONDITION
+BB_LENGTH = config.BB_LENGTH
+BB_STDDEV = config.BB_STDDEV
+RSI_LENGTH = config.RSI_LENGTH
+TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN', config.TELEGRAM_BOT_TOKEN)
+TELEGRAM_CHAT_ID = config.TELEGRAM_CHAT_ID
+CHECK_INTERVAL_SECONDS = config.CHECK_INTERVAL_SECONDS
+ANALYSIS_TIMEFRAME = config.ANALYSIS_TIMEFRAME
+NOTIFICATION_TIMEFRAME = config.NOTIFICATION_TIMEFRAME
+HISTORY_LIMIT = config.HISTORY_LIMIT
+REQUEST_TIMEOUT_SECONDS = getattr(config, "REQUEST_TIMEOUT_SECONDS", 10)
 
-# -- Alert Logic --
-TARGET_RATIO = 7
-ALERT_CONDITION = 'above'
-
-# -- Technical Analysis Parameters (from your Pine Script) --
-BB_LENGTH = 20
-BB_STDDEV = 2.0
-RSI_LENGTH = 14
+try:
+    EXCHANGE = ccxt.binance({"enableRateLimit": True})
+except Exception as exc:
+    print(f"Failed to initialize exchange client: {exc}")
+    exit(1)
 
 
-# -- Telegram Settings --
-# Get these from BotFather on Telegram
-TELEGRAM_BOT_TOKEN = '8313128066:AAF1fJlZQq6wATZU7rd8zQFYajdmjO6EW3k'
-# Get this by adding your bot to a group and checking the API response
-TELEGRAM_CHAT_ID = '376895924'
+def _safe_fetch_ohlcv(symbol, timeframe, limit):
+    """Fetches OHLCV data while handling common issues gracefully."""
+    try:
+        data = EXCHANGE.fetch_ohlcv(symbol, timeframe=timeframe, limit=limit)
+    except ccxt.BaseError as exc:
+        print(f"Exchange error for {symbol} ({timeframe}): {exc}")
+        return None
+    except Exception as exc:  # Network or unexpected error
+        print(f"Unexpected error fetching {symbol} ({timeframe}): {exc}")
+        return None
 
+    if not data:
+        print(f"No OHLCV data returned for {symbol} ({timeframe}).")
+        return None
 
-# -- Timing & Data --
-CHECK_INTERVAL_SECONDS = 5  # Check every 5 seconds for quick notifications
-# Analysis Timeframe - Used for calculating indicators and recommendations
-# Using 1hr or 4hr gives more stable signals by filtering short-term noise
-ANALYSIS_TIMEFRAME = '1h'  # For reliable technical analysis (1hr = ~4 days, 4hr = ~16 days)
-# Notification Timeframe - Used for quick price monitoring
-NOTIFICATION_TIMEFRAME = '1m'  # For immediate price alerts
-# How many historical candles to fetch for calculations
-HISTORY_LIMIT = 100
+    return data
+
 
 # -----------------------------------------------------------------------------
 # --- 2. NOTIFICATION MODULE (Unchanged) ---
@@ -53,18 +69,21 @@ HISTORY_LIMIT = 100
 def send_telegram_notification(message):
     """Sends a message to your configured Telegram chat."""
     print(f"Sending notification...")
+    if not TELEGRAM_BOT_TOKEN:
+        print("Telegram bot token missing. Skipping notification.")
+        return False
     try:
         url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
         payload = { 'chat_id': TELEGRAM_CHAT_ID, 'text': message, 'parse_mode': 'Markdown' }
-        response = requests.post(url, json=payload)
-        if response.status_code == 200:
-            print("Notification sent successfully.")
-            return True
-        else:
-            print(f"Error sending notification: {response.text}")
-            return False
-    except Exception as e:
-        print(f"An exception occurred while sending notification: {e}")
+        response = requests.post(url, json=payload, timeout=REQUEST_TIMEOUT_SECONDS)
+        response.raise_for_status()
+        print("Notification sent successfully.")
+        return True
+    except RequestException as exc:
+        print(f"Error sending notification: {exc}")
+        return False
+    except Exception as exc:
+        print(f"An unexpected error occurred while sending notification: {exc}")
         return False
 
 # -----------------------------------------------------------------------------
@@ -130,26 +149,45 @@ def get_market_data_and_metrics():
     Returns a dictionary with all the relevant data.
     """
     try:
-        exchange = ccxt.binance() # Assuming Binance is the exchange
-
         # Fetch current prices using short timeframe for quick notifications
-        current_ohlcv1 = exchange.fetch_ohlcv(TICKER_SYMBOL_1, timeframe=NOTIFICATION_TIMEFRAME, limit=1)
-        current_ohlcv2 = exchange.fetch_ohlcv(TICKER_SYMBOL_2, timeframe=NOTIFICATION_TIMEFRAME, limit=1)
+        current_ohlcv1 = _safe_fetch_ohlcv(TICKER_SYMBOL_1, NOTIFICATION_TIMEFRAME, 1)
+        current_ohlcv2 = _safe_fetch_ohlcv(TICKER_SYMBOL_2, NOTIFICATION_TIMEFRAME, 1)
 
         # Fetch historical OHLCV data using longer timeframe for stable analysis
-        ohlcv1 = exchange.fetch_ohlcv(TICKER_SYMBOL_1, timeframe=ANALYSIS_TIMEFRAME, limit=HISTORY_LIMIT)
-        ohlcv2 = exchange.fetch_ohlcv(TICKER_SYMBOL_2, timeframe=ANALYSIS_TIMEFRAME, limit=HISTORY_LIMIT)
+        ohlcv1 = _safe_fetch_ohlcv(TICKER_SYMBOL_1, ANALYSIS_TIMEFRAME, HISTORY_LIMIT)
+        ohlcv2 = _safe_fetch_ohlcv(TICKER_SYMBOL_2, ANALYSIS_TIMEFRAME, HISTORY_LIMIT)
+
+        if not all([current_ohlcv1, current_ohlcv2, ohlcv1, ohlcv2]):
+            return None
 
         # Convert to pandas DataFrame for easier manipulation
         df1 = pd.DataFrame(ohlcv1, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
         df2 = pd.DataFrame(ohlcv2, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
 
+        if df1.empty or df2.empty:
+            print("Received empty OHLCV dataframes.")
+            return None
+
         # Get current prices from the short timeframe
         current_price1 = current_ohlcv1[0][4]  # Close price
         current_price2 = current_ohlcv2[0][4]  # Close price
 
+        if current_price1 is None or current_price2 in (None, 0):
+            print("Invalid current prices received.")
+            return None
+
         # Calculate the ratio series from the closing prices (using analysis timeframe)
         ratio_series = df1['close'] / df2['close']
+        ratio_series = ratio_series.replace([pd.NA, math.inf, -math.inf], pd.NA).dropna()
+
+        if ratio_series.empty:
+            print("Ratio series is empty after cleaning.")
+            return None
+
+        min_required = max(BB_LENGTH, RSI_LENGTH) + 5  # buffer for warm-up periods
+        if len(ratio_series) < min_required:
+            print(f"Not enough data points for indicators (have {len(ratio_series)}, need {min_required}).")
+            return None
 
         # --- Calculate Technical Indicators using ta ---
         # Bollinger Bands
@@ -157,6 +195,11 @@ def get_market_data_and_metrics():
 
         # RSI
         indicator_rsi = ta.momentum.RSIIndicator(close=ratio_series, window=RSI_LENGTH)
+
+        rsi_series = indicator_rsi.rsi().dropna()
+        if rsi_series.empty:
+            print("RSI series is empty; insufficient data after indicator warm-up.")
+            return None
 
         # Use current prices from 5m timeframe for real-time monitoring
         latest_price1 = current_price1
@@ -166,12 +209,19 @@ def get_market_data_and_metrics():
 
         # Get historical ratio for comparison
         historical_ratio = ratio_series.iloc[-1]
-        latest_rsi = indicator_rsi.rsi().iloc[-1]
+        latest_rsi = rsi_series.iloc[-1]
 
         # Calculate Z-Score manually from Bollinger Bands (using analysis timeframe data)
         # Z-Score = (Price - Moving Average) / Standard Deviation
-        sma = indicator_bb.bollinger_mavg().iloc[-1]
-        stdev = (indicator_bb.bollinger_hband().iloc[-1] - sma) / BB_STDDEV if BB_STDDEV > 0 else 0
+        sma_series = indicator_bb.bollinger_mavg().dropna()
+        hband_series = indicator_bb.bollinger_hband().dropna()
+
+        if sma_series.empty or hband_series.empty:
+            print("Bollinger Band series returned insufficient data.")
+            return None
+
+        sma = sma_series.iloc[-1]
+        stdev = (hband_series.iloc[-1] - sma) / BB_STDDEV if BB_STDDEV > 0 else 0
         # Use current ratio for Z-Score calculation
         z_score = (latest_ratio - sma) / stdev if stdev > 0 else 0
 
@@ -184,6 +234,9 @@ def get_market_data_and_metrics():
             "rsi": latest_rsi
         }
 
+    except ZeroDivisionError:
+        print("Encountered division by zero while computing ratio.")
+        return None
     except Exception as e:
         print(f"An error occurred while fetching data or calculating metrics: {e}")
         return None
@@ -202,90 +255,93 @@ if __name__ == "__main__":
 
     alert_sent = False
 
-    while True:
-        data = get_market_data_and_metrics()
+    try:
+        while True:
+            data = get_market_data_and_metrics()
 
-        if data:
-            z_interpretation = interpret_z_score(data['z_score'])
-            print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] "
-                  f"{BASE_SYMBOL} Price: ${data['price1']:.4f}, "
-                  f"{QUOTE_SYMBOL} Price: ${data['price2']:.4f}, "
-                  f"Ratio: {data['ratio']:.6f}, "
-                  f"Ratio Trend: {data['z_score']:.2f} ({z_interpretation}), "
-                  f"RSI: {data['rsi']:.2f}")
-
-            # Check the trigger condition
-            trigger = False
-            if ALERT_CONDITION == 'above' and data['ratio'] > TARGET_RATIO:
-                trigger = True
-            elif ALERT_CONDITION == 'below' and data['ratio'] < TARGET_RATIO:
-                trigger = True
-
-            # If the condition is met AND we haven't sent an alert yet
-            if trigger and not alert_sent:
-                # --- Build the new, detailed message ---
+            if data:
                 z_interpretation = interpret_z_score(data['z_score'])
+                print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] "
+                      f"{BASE_SYMBOL} Price: ${data['price1']:.4f}, "
+                      f"{QUOTE_SYMBOL} Price: ${data['price2']:.4f}, "
+                      f"Ratio: {data['ratio']:.6f}, "
+                      f"Ratio Trend: {data['z_score']:.2f} ({z_interpretation}), "
+                      f"RSI: {data['rsi']:.2f}")
 
-                # Additional context based on Z-Score sign
-                z_context = "ratio is ABOVE average" if data['z_score'] > 0 else "ratio is BELOW average"
+                # Check the trigger condition
+                trigger = False
+                if ALERT_CONDITION == 'above' and data['ratio'] > TARGET_RATIO:
+                    trigger = True
+                elif ALERT_CONDITION == 'below' and data['ratio'] < TARGET_RATIO:
+                    trigger = True
 
-                # Get trading recommendation
-                trading_rec = get_trading_recommendation(data['z_score'], data['rsi'], BASE_SYMBOL, QUOTE_SYMBOL)
+                # If the condition is met AND we haven't sent an alert yet
+                if trigger and not alert_sent:
+                    # --- Build the new, detailed message ---
+                    z_interpretation = interpret_z_score(data['z_score'])
 
-                message = (
-                    f"🔔 *Ratio Alert: {BASE_SYMBOL}/{QUOTE_SYMBOL}* 🔔\n\n"
-                    f"The ratio `{data['ratio']:.6f}` has crossed *{ALERT_CONDITION}* your target of `{TARGET_RATIO}`.\n"
-                    "========================================\n\n"
-                    f"*📊 Current Prices*\n"
-                    f"• *{BASE_SYMBOL}:* `${data['price1']:.4f}`\n"
-                    f"• *{QUOTE_SYMBOL}:* `${data['price2']:.4f}`\n\n"
-                    "========================================\n\n"
-                    f"*📈 Technical Analysis*\n\n"
-                    f"*Ratio Trend:* `{data['z_score']:.2f}` _{z_interpretation}_\n"
-                    f"↳ The {z_context}\n"
-                    f"_Measures how far the ratio is from normal levels_\n\n"
-                    f"*RSI ({RSI_LENGTH}):* `{data['rsi']:.2f}`\n"
-                    f"_Momentum indicator (>70 overbought, <30 oversold)_\n\n"
-                    "========================================\n\n"
-                    f"*🎯 Trading Recommendation*\n\n"
-                    f"{trading_rec}\n"
-                    "========================================\n\n"
-                    f"*🧠 How This Works*\n\n"
-                    f"*Dual-Timeframe System:*\n"
-                    f"• Quick Alerts: {NOTIFICATION_TIMEFRAME} prices (checked every {CHECK_INTERVAL_SECONDS}s)\n"
-                    f"• Smart Analysis: {ANALYSIS_TIMEFRAME} data (last {HISTORY_LIMIT} candles)\n\n"
-                    f"*Step 1: Historical Analysis*\n"
-                    f"• Analyzed {HISTORY_LIMIT} {ANALYSIS_TIMEFRAME} candles for stable patterns\n"
-                    f"• {ANALYSIS_TIMEFRAME} timeframe filters out short-term noise\n"
-                    f"• Calculated historical {BASE_SYMBOL}/{QUOTE_SYMBOL} ratio trends\n"
-                    f"• Computed the average ratio and price volatility\n\n"
-                    f"*Step 2: Statistical Comparison*\n"
-                    f"• Current ratio: `{data['ratio']:.4f}`\n"
-                    f"• Ratio Trend score: `{data['z_score']:.2f}` standard deviations from average\n"
-                    f"• This means: Current ratio is _{z_interpretation.lower()}_\n\n"
-                    f"*Step 3: Mean Reversion Strategy*\n"
-                    f"• When ratio is EXTREME (±2+), it tends to revert to average\n"
-                    f"• High ratio → {BASE_SYMBOL} likely to drop or {QUOTE_SYMBOL} to rise\n"
-                    f"• Low ratio → {BASE_SYMBOL} likely to rise or {QUOTE_SYMBOL} to drop\n\n"
-                    f"*Step 4: Momentum Confirmation (RSI)*\n"
-                    f"• RSI {data['rsi']:.0f} shows if the trend is exhausted\n"
-                    f"• Overbought (>70) + high ratio = strong sell signal\n"
-                    f"• Oversold (<30) + low ratio = strong buy signal\n\n"
-                    "========================================\n\n"
-                    f"*💭 Simple Explanation*\n"
-                    f"Think of it like a rubber band:\n"
-                    f"• Ratio Trend = How stretched the rubber band is\n"
-                    f"• +2 or higher = Stretched too far up (will snap back down)\n"
-                    f"• -2 or lower = Stretched too far down (will snap back up)\n"
-                    f"• Near 0 = Normal position (no strong force)\n\n"
-                    f"The system predicts the rubber band will return to normal, creating profit opportunities!"
-                )
-                if send_telegram_notification(message):
-                    alert_sent = True
+                    # Additional context based on Z-Score sign
+                    z_context = "ratio is ABOVE average" if data['z_score'] > 0 else "ratio is BELOW average"
 
-            # Reset the alert flag if the ratio moves back to a "safe" zone
-            elif not trigger and alert_sent:
-                print("Ratio has moved back to a safe zone. Resetting alert flag.")
-                alert_sent = False
+                    # Get trading recommendation
+                    trading_rec = get_trading_recommendation(data['z_score'], data['rsi'], BASE_SYMBOL, QUOTE_SYMBOL)
 
-        time.sleep(CHECK_INTERVAL_SECONDS)
+                    message = (
+                        f"🔔 *Ratio Alert: {BASE_SYMBOL}/{QUOTE_SYMBOL}* 🔔\n\n"
+                        f"The ratio `{data['ratio']:.6f}` has crossed *{ALERT_CONDITION}* your target of `{TARGET_RATIO}`.\n"
+                        "========================================\n\n"
+                        f"*📊 Current Prices*\n"
+                        f"• *{BASE_SYMBOL}:* `${data['price1']:.4f}`\n"
+                        f"• *{QUOTE_SYMBOL}:* `${data['price2']:.4f}`\n\n"
+                        "========================================\n\n"
+                        f"*📈 Technical Analysis*\n\n"
+                        f"*Ratio Trend:* `{data['z_score']:.2f}` _{z_interpretation}_\n"
+                        f"↳ The {z_context}\n"
+                        f"_Measures how far the ratio is from normal levels_\n\n"
+                        f"*RSI ({RSI_LENGTH}):* `{data['rsi']:.2f}`\n"
+                        f"_Momentum indicator (>70 overbought, <30 oversold)_\n\n"
+                        "========================================\n\n"
+                        f"*🎯 Trading Recommendation*\n\n"
+                        f"{trading_rec}\n"
+                        "========================================\n\n"
+                        f"*🧠 How This Works*\n\n"
+                        f"*Dual-Timeframe System:*\n"
+                        f"• Quick Alerts: {NOTIFICATION_TIMEFRAME} prices (checked every {CHECK_INTERVAL_SECONDS}s)\n"
+                        f"• Smart Analysis: {ANALYSIS_TIMEFRAME} data (last {HISTORY_LIMIT} candles)\n\n"
+                        f"*Step 1: Historical Analysis*\n"
+                        f"• Analyzed {HISTORY_LIMIT} {ANALYSIS_TIMEFRAME} candles for stable patterns\n"
+                        f"• {ANALYSIS_TIMEFRAME} timeframe filters out short-term noise\n"
+                        f"• Calculated historical {BASE_SYMBOL}/{QUOTE_SYMBOL} ratio trends\n"
+                        f"• Computed the average ratio and price volatility\n\n"
+                        f"*Step 2: Statistical Comparison*\n"
+                        f"• Current ratio: `{data['ratio']:.4f}`\n"
+                        f"• Ratio Trend score: `{data['z_score']:.2f}` standard deviations from average\n"
+                        f"• This means: Current ratio is _{z_interpretation.lower()}_\n\n"
+                        f"*Step 3: Mean Reversion Strategy*\n"
+                        f"• When ratio is EXTREME (±2+), it tends to revert to average\n"
+                        f"• High ratio → {BASE_SYMBOL} likely to drop or {QUOTE_SYMBOL} to rise\n"
+                        f"• Low ratio → {BASE_SYMBOL} likely to rise or {QUOTE_SYMBOL} to drop\n\n"
+                        f"*Step 4: Momentum Confirmation (RSI)*\n"
+                        f"• RSI {data['rsi']:.0f} shows if the trend is exhausted\n"
+                        f"• Overbought (>70) + high ratio = strong sell signal\n"
+                        f"• Oversold (<30) + low ratio = strong buy signal\n\n"
+                        "========================================\n\n"
+                        f"*💭 Simple Explanation*\n"
+                        f"Think of it like a rubber band:\n"
+                        f"• Ratio Trend = How stretched the rubber band is\n"
+                        f"• +2 or higher = Stretched too far up (will snap back down)\n"
+                        f"• -2 or lower = Stretched too far down (will snap back up)\n"
+                        f"• Near 0 = Normal position (no strong force)\n\n"
+                        f"The system predicts the rubber band will return to normal, creating profit opportunities!"
+                    )
+                    if send_telegram_notification(message):
+                        alert_sent = True
+
+                # Reset the alert flag if the ratio moves back to a "safe" zone
+                elif not trigger and alert_sent:
+                    print("Ratio has moved back to a safe zone. Resetting alert flag.")
+                    alert_sent = False
+
+            time.sleep(CHECK_INTERVAL_SECONDS)
+    except KeyboardInterrupt:
+        print("Received exit signal. Shutting down.")
