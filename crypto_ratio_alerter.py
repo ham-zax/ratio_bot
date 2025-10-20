@@ -21,7 +21,7 @@ TICKER_SYMBOL_2 = 'PIXEL/USDT'
 
 # -- Alert Logic --
 TARGET_RATIO = 7
-ALERT_CONDITION = 'above' 
+ALERT_CONDITION = 'above'
 
 # -- Technical Analysis Parameters (from your Pine Script) --
 BB_LENGTH = 20
@@ -31,9 +31,9 @@ RSI_LENGTH = 14
 
 # -- Telegram Settings --
 # Get these from BotFather on Telegram
-TELEGRAM_BOT_TOKEN = '8313128066:AAF1fJlZQq6wATZU7rd8zQFYajdmjO6EW3k' 
+TELEGRAM_BOT_TOKEN = '8313128066:AAF1fJlZQq6wATZU7rd8zQFYajdmjO6EW3k'
 # Get this by adding your bot to a group and checking the API response
-TELEGRAM_CHAT_ID = '376895924' 
+TELEGRAM_CHAT_ID = '376895924'
 
 
 # -- Timing & Data --
@@ -55,7 +55,7 @@ def send_telegram_notification(message):
     print(f"Sending notification...")
     try:
         url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-        payload = { 'chat_id': TELEGRAM_CHAT_ID, 'text': message, 'parse_mode': 'Markdown' } 
+        payload = { 'chat_id': TELEGRAM_CHAT_ID, 'text': message, 'parse_mode': 'Markdown' }
         response = requests.post(url, json=payload)
         if response.status_code == 200:
             print("Notification sent successfully.")
@@ -92,7 +92,7 @@ def get_trading_recommendation(z_score, rsi, base_symbol, quote_symbol):
     Returns a recommendation string with clear actions.
     """
     recommendation = ""
-    
+
     # Analyze Z-Score (Ratio Trend)
     if z_score > 2:
         # Ratio is extremely high - OM is expensive relative to PIXEL
@@ -108,7 +108,7 @@ def get_trading_recommendation(z_score, rsi, base_symbol, quote_symbol):
         recommendation += f"ℹ️ *Ratio is in NORMAL range*\n"
         recommendation += f"💡 *Action:* HOLD or wait for better opportunity\n"
         recommendation += f"_No extreme price difference detected._\n\n"
-    
+
     # Add RSI confirmation
     if rsi > 70 and z_score > 0:
         recommendation += f"🔴 *RSI Confirms:* Ratio is OVERBOUGHT ({rsi:.0f})\n"
@@ -120,7 +120,7 @@ def get_trading_recommendation(z_score, rsi, base_symbol, quote_symbol):
         recommendation += f"⚠️ *RSI Warning:* Ratio momentum is high ({rsi:.0f})\n"
     elif rsi < 30:
         recommendation += f"⚠️ *RSI Warning:* Ratio momentum is low ({rsi:.0f})\n"
-    
+
     return recommendation
 
 def get_market_data_and_metrics():
@@ -131,11 +131,11 @@ def get_market_data_and_metrics():
     """
     try:
         exchange = ccxt.binance() # Assuming Binance is the exchange
-        
+
         # Fetch current prices using short timeframe for quick notifications
         current_ohlcv1 = exchange.fetch_ohlcv(TICKER_SYMBOL_1, timeframe=NOTIFICATION_TIMEFRAME, limit=1)
         current_ohlcv2 = exchange.fetch_ohlcv(TICKER_SYMBOL_2, timeframe=NOTIFICATION_TIMEFRAME, limit=1)
-        
+
         # Fetch historical OHLCV data using longer timeframe for stable analysis
         ohlcv1 = exchange.fetch_ohlcv(TICKER_SYMBOL_1, timeframe=ANALYSIS_TIMEFRAME, limit=HISTORY_LIMIT)
         ohlcv2 = exchange.fetch_ohlcv(TICKER_SYMBOL_2, timeframe=ANALYSIS_TIMEFRAME, limit=HISTORY_LIMIT)
@@ -143,18 +143,18 @@ def get_market_data_and_metrics():
         # Convert to pandas DataFrame for easier manipulation
         df1 = pd.DataFrame(ohlcv1, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
         df2 = pd.DataFrame(ohlcv2, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-        
+
         # Get current prices from the short timeframe
         current_price1 = current_ohlcv1[0][4]  # Close price
         current_price2 = current_ohlcv2[0][4]  # Close price
 
         # Calculate the ratio series from the closing prices (using analysis timeframe)
         ratio_series = df1['close'] / df2['close']
-        
+
         # --- Calculate Technical Indicators using ta ---
         # Bollinger Bands
         indicator_bb = ta.volatility.BollingerBands(close=ratio_series, window=BB_LENGTH, window_dev=BB_STDDEV)
-        
+
         # RSI
         indicator_rsi = ta.momentum.RSIIndicator(close=ratio_series, window=RSI_LENGTH)
 
@@ -163,11 +163,11 @@ def get_market_data_and_metrics():
         latest_price2 = current_price2
         # Calculate current ratio
         latest_ratio = latest_price1 / latest_price2
-        
+
         # Get historical ratio for comparison
         historical_ratio = ratio_series.iloc[-1]
         latest_rsi = indicator_rsi.rsi().iloc[-1]
-        
+
         # Calculate Z-Score manually from Bollinger Bands (using analysis timeframe data)
         # Z-Score = (Price - Moving Average) / Standard Deviation
         sma = indicator_bb.bollinger_mavg().iloc[-1]
@@ -200,11 +200,11 @@ if __name__ == "__main__":
     print(f"Alerting when ratio is {ALERT_CONDITION} {TARGET_RATIO}")
     print("------------------------------------------")
 
-    alert_sent = False 
+    alert_sent = False
 
     while True:
         data = get_market_data_and_metrics()
-        
+
         if data:
             z_interpretation = interpret_z_score(data['z_score'])
             print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] "
@@ -225,13 +225,13 @@ if __name__ == "__main__":
             if trigger and not alert_sent:
                 # --- Build the new, detailed message ---
                 z_interpretation = interpret_z_score(data['z_score'])
-                
+
                 # Additional context based on Z-Score sign
                 z_context = "ratio is ABOVE average" if data['z_score'] > 0 else "ratio is BELOW average"
-                
+
                 # Get trading recommendation
                 trading_rec = get_trading_recommendation(data['z_score'], data['rsi'], BASE_SYMBOL, QUOTE_SYMBOL)
-                
+
                 message = (
                     f"🔔 *Ratio Alert: {BASE_SYMBOL}/{QUOTE_SYMBOL}* 🔔\n\n"
                     f"The ratio `{data['ratio']:.6f}` has crossed *{ALERT_CONDITION}* your target of `{TARGET_RATIO}`.\n"
@@ -282,7 +282,7 @@ if __name__ == "__main__":
                 )
                 if send_telegram_notification(message):
                     alert_sent = True
-            
+
             # Reset the alert flag if the ratio moves back to a "safe" zone
             elif not trigger and alert_sent:
                 print("Ratio has moved back to a safe zone. Resetting alert flag.")
