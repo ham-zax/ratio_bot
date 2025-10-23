@@ -1,0 +1,65 @@
+# Ratio Bot Operations Guide
+
+## 1. Connect to the Server
+```bash
+ssh ubuntu@161.118.162.223 -i "C:/Users/Hamza/Downloads/ssh-key-2025-10-20.key"
+```
+You will land in the home directory that contains the project folder `trading_bot/`.
+
+## 2. Deploy a New Release
+1. From your local project root, replace the previous bot bundle on the server:
+   ```bash
+   rsync -avz --delete -e "ssh -i C:/Users/Hamza/Downloads/ssh-key-2025-10-20.key" ./ ubuntu@161.118.162.223:~/trading_bot/
+   ```
+   This uploads the current working directory and removes any stale files on the server.
+2. SSH into the server (see above).
+3. Run the deployment helper:
+   ```bash
+   cd trading_bot/
+   ./deploy.sh --restart
+   ```
+   Key options:
+   - `--restart`: stop any running screen session and relaunch with the latest code.
+   - `--skip-install`: skip dependency installation (useful when requirements have not changed).
+   - `--refresh-venv`: rebuild the virtual environment from scratch.
+
+The script takes care of virtualenv creation/upgrades, dependency installation, and optional restarts.
+
+## 3. Manage the Running Bot
+- Create/attach to a screen session:
+  ```bash
+  screen -S ratio_bot          # create or switch to session
+  screen -r ratio_bot          # reattach if detached
+  ```
+- Inside the session:
+  ```bash
+  source venv/bin/activate
+  python crypto_ratio_alerter.py
+  ```
+- Detach from screen without stopping the bot: `Ctrl + A`, then `D`.
+
+## 4. Stop or Restart the Bot Manually
+- From the host shell (outside screen):
+  ```bash
+  screen -XS ratio_bot quit    # terminate session and bot
+  ```
+- To stop only the Python process:
+  ```bash
+  pkill -f crypto_ratio_alerter.py
+  ```
+
+## 5. Monitoring & Logs
+- While attached to the `ratio_bot` screen session, the bot streams live telemetry.
+- To view recent history without attaching:
+  ```bash
+  screen -S ratio_bot -X hardcopy ~/ratio_bot.log
+  tail -n 100 ~/ratio_bot.log
+  ```
+
+## 6. Troubleshooting Checklist
+- **No output?** Ensure you are inside the virtualenv and running the script in screen.
+- **Dependencies failing?** Re-run `./deploy.sh --refresh-venv`.
+- **Screen session lost?** List active sessions with `screen -ls`.
+- **Telegram alerts missing?** Verify `TELEGRAM_BOT_TOKEN` and network connectivity.
+
+Keeping these steps handy should streamline deployments and ongoing maintenance.
