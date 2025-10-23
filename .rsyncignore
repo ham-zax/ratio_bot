@@ -1,0 +1,4 @@
+.venv/
+venv/
+.volta/
+node_modules/

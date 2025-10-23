@@ -9,7 +9,16 @@ You will land in the home directory that contains the project folder `trading_bo
 ## 2. Deploy a New Release
 1. From your local project root, replace the previous bot bundle on the server:
    ```bash
-   rsync -avz --delete -e "ssh -i C:/Users/Hamza/Downloads/ssh-key-2025-10-20.key" ./ ubuntu@161.118.162.223:~/trading_bot/
+   cd /mnt/c/Users/Hamza/personal/bot
+rsync -avz --delete \
+  --exclude '.git/' \
+  --exclude '.volta/' \
+  --exclude 'node_modules/' \
+  --exclude 'venv/' \
+  --exclude '__pycache__/' \
+  -e "ssh -i ~/.ssh/ssh-key-2025-10-20.key" \
+  ./ ubuntu@161.118.162.223:~/trading_bot/
+
    ```
    This uploads the current working directory and removes any stale files on the server.
 2. SSH into the server (see above).
