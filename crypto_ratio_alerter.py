@@ -67,21 +67,62 @@ HISTORY_LIMIT = config.HISTORY_LIMIT
 REQUEST_TIMEOUT_SECONDS = getattr(config, "REQUEST_TIMEOUT_SECONDS", 10)
 
 try:
-    EXCHANGE = ccxt.binance({"enableRateLimit": True})
-except Exception as exc:
+    EXCHANGE = ccxt.binanceusdm(
+        {
+            "enableRateLimit": True,
+            "options": {
+                "defaultType": "future",
+                "defaultSubType": "linear",
+            },
+        }
+    )
+    EXCHANGE.load_markets()
+    EXCHANGE._markets_loaded = True
+except ccxt.BaseError as exc:
     print(f"Failed to initialize exchange client: {exc}")
     exit(1)
+except Exception as exc:
+    print(f"Unexpected error during exchange setup: {exc}")
+    exit(1)
+
+
+def _ensure_markets_loaded():
+    """Ensures market metadata is cached to avoid repeated exchangeInfo requests."""
+    if getattr(EXCHANGE, "_markets_loaded", False):
+        return True
+    try:
+        EXCHANGE.load_markets()
+        EXCHANGE._markets_loaded = True
+        return True
+    except ccxt.BaseError as exc:
+        print(f"Exchange error while loading markets: {exc}")
+    except Exception as exc:
+        print(f"Unexpected error loading markets: {exc}")
+    return False
 
 
 def _safe_fetch_ohlcv(symbol, timeframe, limit):
     """Fetches OHLCV data while handling common issues gracefully."""
-    try:
-        data = EXCHANGE.fetch_ohlcv(symbol, timeframe=timeframe, limit=limit)
-    except ccxt.BaseError as exc:
-        print(f"Exchange error for {symbol} ({timeframe}): {exc}")
+    if not _ensure_markets_loaded():
         return None
-    except Exception as exc:  # Network or unexpected error
-        print(f"Unexpected error fetching {symbol} ({timeframe}): {exc}")
+
+    data = None
+    for attempt in range(2):
+        try:
+            data = EXCHANGE.fetch_ohlcv(symbol, timeframe=timeframe, limit=limit)
+            break
+        except ccxt.RateLimitExceeded as exc:
+            wait_seconds = 1.5 * (attempt + 1)
+            print(f"Rate limit hit fetching {symbol} ({timeframe}): {exc}. Sleeping {wait_seconds:.1f}s.")
+            time.sleep(wait_seconds)
+        except ccxt.BaseError as exc:
+            print(f"Exchange error for {symbol} ({timeframe}): {exc}")
+            return None
+        except Exception as exc:  # Network or unexpected error
+            print(f"Unexpected error fetching {symbol} ({timeframe}): {exc}")
+            return None
+
+    if data is None:
         return None
 
     if not data:
@@ -407,16 +448,24 @@ def get_market_data_and_metrics():
     Returns a dictionary with all the relevant data.
     """
     try:
+        min_required = max(BB_LENGTH, RSI_LENGTH, RSI_PERCENTILE_LOOKBACK) + 10
+        history_limit = max(HISTORY_LIMIT, min_required)
+        if HISTORY_LIMIT < min_required and not getattr(get_market_data_and_metrics, "_history_limit_warned", False):
+            print(f"Configured HISTORY_LIMIT ({HISTORY_LIMIT}) fetches {HISTORY_LIMIT} candles, "
+                  f"but the indicators need at least {min_required}. Requesting {history_limit} candles this run. "
+                  f"Update HISTORY_LIMIT in config.py to {min_required} or higher to skip this warning.")
+            get_market_data_and_metrics._history_limit_warned = True
+
         # Fetch current prices using short timeframe for quick notifications
         current_ohlcv1 = _safe_fetch_ohlcv(TICKER_SYMBOL_1, NOTIFICATION_TIMEFRAME, 1)
         current_ohlcv2 = _safe_fetch_ohlcv(TICKER_SYMBOL_2, NOTIFICATION_TIMEFRAME, 1)
 
         # Fetch historical OHLCV data using longer timeframe for stable analysis
-        ohlcv1 = _safe_fetch_ohlcv(TICKER_SYMBOL_1, ANALYSIS_TIMEFRAME, HISTORY_LIMIT)
-        ohlcv2 = _safe_fetch_ohlcv(TICKER_SYMBOL_2, ANALYSIS_TIMEFRAME, HISTORY_LIMIT)
+        ohlcv1 = _safe_fetch_ohlcv(TICKER_SYMBOL_1, ANALYSIS_TIMEFRAME, history_limit)
+        ohlcv2 = _safe_fetch_ohlcv(TICKER_SYMBOL_2, ANALYSIS_TIMEFRAME, history_limit)
         
         # Fetch benchmark for correlation
-        benchmark_ohlcv = _safe_fetch_ohlcv(BENCHMARK_SYMBOL, ANALYSIS_TIMEFRAME, HISTORY_LIMIT)
+        benchmark_ohlcv = _safe_fetch_ohlcv(BENCHMARK_SYMBOL, ANALYSIS_TIMEFRAME, history_limit)
 
         if not all([current_ohlcv1, current_ohlcv2, ohlcv1, ohlcv2]):
             return None
@@ -445,7 +494,6 @@ def get_market_data_and_metrics():
             print("Ratio series is empty after cleaning.")
             return None
 
-        min_required = max(BB_LENGTH, RSI_LENGTH, RSI_PERCENTILE_LOOKBACK) + 10
         if len(ratio_series) < min_required:
             print(f"Not enough data points for indicators (have {len(ratio_series)}, need {min_required}).")
             return None
@@ -593,9 +641,10 @@ if __name__ == "__main__":
                       f"{BASE_SYMBOL}: ${data['price1']:.4f} | "
                       f"{QUOTE_SYMBOL}: ${data['price2']:.4f} | "
                       f"Ratio: {data['ratio']:.6f} | "
-                      f"Z: {data['z_score']:.2f} ({z_interpretation}) | "
+                      f"Distance From Avg (Z-Score): {data['z_score']:.2f}σ ({z_interpretation}) | "
                       f"RSI: {data['rsi']:.1f} | "
-                      f"Conf S/B: {sell_conf:.0f}%({sell_score})/{ buy_conf:.0f}%({buy_score})")
+                      f"Sell Confidence: {sell_conf:.0f}% ({sell_score}/4 cond) | "
+                      f"Buy Confidence: {buy_conf:.0f}% ({buy_score}/4 cond)")
 
                 # --- MTF Filter Logic ---
                 mtf_sell_ok = True
