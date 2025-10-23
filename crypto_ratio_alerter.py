@@ -26,6 +26,7 @@ TICKER_SYMBOL_1 = config.TICKER_SYMBOL_1
 TICKER_SYMBOL_2 = config.TICKER_SYMBOL_2
 TARGET_RATIO = config.TARGET_RATIO
 ALERT_CONDITION = config.ALERT_CONDITION
+INTERVAL_NOTIFICATION = getattr(config, "INTERVAL_NOTIFICATION", 0.1)
 BB_LENGTH = config.BB_LENGTH
 BB_STDDEV = config.BB_STDDEV
 RSI_LENGTH = config.RSI_LENGTH
@@ -251,9 +252,12 @@ if __name__ == "__main__":
     print(f"• Notification Speed: {NOTIFICATION_TIMEFRAME} (checked every {CHECK_INTERVAL_SECONDS}s)")
     print(f"• Analysis Timeframe: {ANALYSIS_TIMEFRAME} (for stable recommendations)")
     print(f"Alerting when ratio is {ALERT_CONDITION} {TARGET_RATIO}")
+    if INTERVAL_NOTIFICATION > 0:
+        print(f"• Interval Notifications: Every {INTERVAL_NOTIFICATION} ratio change")
     print("------------------------------------------")
 
     alert_sent = False
+    last_notified_interval = None  # Track the last notified interval
 
     try:
         while True:
@@ -268,7 +272,33 @@ if __name__ == "__main__":
                       f"Ratio Trend: {data['z_score']:.2f} ({z_interpretation}), "
                       f"RSI: {data['rsi']:.2f}")
 
-                # Check the trigger condition
+                # --- Interval Notification Logic ---
+                if INTERVAL_NOTIFICATION > 0:
+                    # Calculate which interval we're currently in
+                    current_interval = math.floor(data['ratio'] / INTERVAL_NOTIFICATION)
+                    
+                    # If we've crossed into a new interval, send notification
+                    if last_notified_interval is None or current_interval != last_notified_interval:
+                        interval_lower = current_interval * INTERVAL_NOTIFICATION
+                        interval_upper = interval_lower + INTERVAL_NOTIFICATION
+                        
+                        # Create a concise interval notification with clear messaging
+                        interval_message = (
+                            f"📊 *Ratio Interval Alert*\n\n"
+                            f"{BASE_SYMBOL}/{QUOTE_SYMBOL} has entered a new interval\n\n"
+                            f"• *Current Ratio:* `{data['ratio']:.6f}`\n"
+                            f"• *Interval Range:* `{interval_lower:.2f}` - `{interval_upper:.2f}`\n"
+                            f"• *{BASE_SYMBOL} Price:* `${data['price1']:.4f}`\n"
+                            f"• *{QUOTE_SYMBOL} Price:* `${data['price2']:.4f}`\n"
+                            f"• *RSI:* `{data['rsi']:.2f}`\n"
+                            f"• *Ratio Trend:* `{data['z_score']:.2f}` ({z_interpretation})"
+                        )
+                        
+                        if send_telegram_notification(interval_message):
+                            last_notified_interval = current_interval
+                            print(f"✓ Interval notification sent - entered range {interval_lower:.2f} to {interval_upper:.2f}")
+
+                # --- Target Ratio Alert Logic (Original) ---
                 trigger = False
                 if ALERT_CONDITION == 'above' and data['ratio'] > TARGET_RATIO:
                     trigger = True
